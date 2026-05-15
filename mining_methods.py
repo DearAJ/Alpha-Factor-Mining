@@ -11,6 +11,7 @@ mining_methods.py - 可插拔的因子挖掘方法注册区
 
 from __future__ import annotations
 
+import json
 import random
 import re
 from dataclasses import dataclass, field
@@ -859,6 +860,45 @@ class MCTSSearchNode:
         if not self.q_value:
             self.q_value = self.reward
 
+    def to_dict(self) -> dict:
+        """将 MCTS 节点及其子树递归序列化为纯 Python 字典（可 JSON 序列化）。
+        用于可视化导出，会跳过 factor_values 等大型数据结构。"""
+        def _convert(v):
+            if isinstance(v, (float, np.floating)):
+                return None if np.isnan(v) or np.isinf(v) else float(v)
+            if isinstance(v, np.integer):
+                return int(v)
+            return v
+
+        def _candidate_dict(c):
+            metrics = {k: _convert(v) for k, v in (c.metrics or {}).items()}
+            extra = {}
+            for k, v in (c.extra or {}).items():
+                if k == "factor_values":
+                    continue
+                extra[k] = _convert(v) if not isinstance(v, str) else v
+            return {
+                "alpha_id": c.alpha_id,
+                "expression": c.expression,
+                "explanation": c.explanation,
+                "metrics": metrics,
+                "extra": extra,
+            }
+
+        return {
+            "node_id": self.node_id,
+            "depth": self.depth,
+            "reward": _convert(self.reward),
+            "q_value": _convert(self.q_value),
+            "visits": self.visits,
+            "target_dimension": self.target_dimension,
+            "refinement_suggestion": self.refinement_suggestion,
+            "candidate": _candidate_dict(self.candidate),
+            "dimension_scores": {k: _convert(v) for k, v in (self.dimension_scores or {}).items()},
+            "parent_id": self.parent.node_id if self.parent else None,
+            "children": [child.to_dict() for child in self.children],
+        }
+
 
 @register_method("alpha_jungle_mcts")
 class AlphaJungleMCTSMethod(StructuredLLMMethodBase):
@@ -932,6 +972,9 @@ class AlphaJungleMCTSMethod(StructuredLLMMethodBase):
             self._backpropagate(child)
             if self._qualifies_for_repository(child):
                 repository.append(child.candidate.to_record())
+
+        # 保存搜索树根节点，供 tree_viz.py 可视化导出
+        self._search_tree_root = root
 
         ranked_nodes = sorted(nodes[1:] or nodes, key=lambda node: node.reward, reverse=True)
         top_n = int(self.params.get("top_n", self.system.config["factors_per_cycle"]))

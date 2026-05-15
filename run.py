@@ -510,6 +510,23 @@ class AutomatedFactorSystem:
         try:
             # 样本内挖掘（由 method_config 指定）
             final_df = self.mining_method.mine_in_sample(cycle_timestamp)
+
+            # ── [可视化] MCTS 搜索树导出（仅 alpha_jungle_mcts 生效）─────────
+            # 如需禁用可视化，注释掉下方 block 即可。
+            # 注意：本 block 不会影响 factor_mad / alpha_agent 等方法。
+            # ─────────────────────────────────────────────────────────────────
+            if hasattr(self.mining_method, "_search_tree_root") and self.mining_method._search_tree_root is not None:
+                try:
+                    from tree_viz import SearchTreeVisualizer
+
+                    viz = SearchTreeVisualizer.from_mcts_method(self.mining_method)
+                    viz.save_html("viz_output/mcts_search_tree.html")
+                    viz.save_json("viz_output/mcts_tree.json")
+                    self.logger.info(f"MCTS 搜索树可视化已保存到 viz_output/")
+                except Exception as viz_err:
+                    self.logger.warning(f"MCTS 可视化导出失败（不影响主流程）: {viz_err}")
+            # ── [可视化结束] ─────────────────────────────────────────────────
+
             if final_df.empty:
                 self.logger.warning("样本内挖掘结果为空，跳过本轮")
                 return False

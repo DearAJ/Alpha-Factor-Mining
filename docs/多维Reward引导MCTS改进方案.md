@@ -173,8 +173,6 @@ UCT(v) = scalar_Q(v) + C(t) * visit_uncertainty(v) + child_bonus(v)
 \sum_d w_d(t) \cdot Q_d(v)
 + C(t) \cdot \sqrt{\frac{\ln N_{\text{parent}}}{N_v}}
 + B_{\text{child}}(v)
-+ B_{\text{novelty}}(v, t)
-- P_{\text{risk}}(v)
 \]
 
 其中：
@@ -183,8 +181,7 @@ UCT(v) = scalar_Q(v) + C(t) * visit_uncertainty(v) + child_bonus(v)
 - \(w_d(t)\)：随搜索进度变化的维度权重
 - \(Q_d(v)\)：节点在该维度上的历史价值
 - \(C(t)\)：探索系数，只负责访问不确定性，不再承担“探索方向”的职责
-- \(B_{\text{novelty}}\)：前期鼓励低相似度、低覆盖维度的结构
-- \(P_{\text{risk}}\)：对过高复杂度、过高相似度、低有效值比例的惩罚
+- \(B_{\text{child}}\)：保留原实现中对子节点较少节点的轻微扩展偏置
 
 ### 1.4 学术依据
 
@@ -202,13 +199,13 @@ UCT(v) = scalar_Q(v) + C(t) * visit_uncertainty(v) + child_bonus(v)
 | 文件 | 修改内容 |
 |------|---------|
 | `mining_methods.py` | 扩展 `MCTSSearchNode`，改造 `_select_node()`、`_backpropagate()`、`_sample_target_dimension()` |
-| `method_config/alpha_jungle_mcts.yaml` | 新增多维 reward 调度配置 |
-| `method_config/alpha_jungle_mcts_cosine.yaml` | 同步新增多维 reward 配置，便于和 cosine C 衰减组合实验 |
+| `method_config/alpha_jungle_mcts_cosine.yaml` | 新增多维 reward 配置，作为“多维 reward + cosine 动态 C”实验配置 |
+| `method_config/alpha_jungle_mcts.yaml` | 不修改，保留为固定 C baseline 对照 |
 | `docs/多维Reward引导MCTS改进方案.md` | 记录设计、实验与参数建议 |
 
 ### 2.2 新增配置参数
 
-在 `alpha_jungle_mcts.yaml` 的 `params` 中新增：
+在 `alpha_jungle_mcts_cosine.yaml` 的 `params` 中新增：
 
 ```yaml
   # ---- 多维 Reward 引导搜索 ----
@@ -244,8 +241,12 @@ UCT(v) = scalar_Q(v) + C(t) * visit_uncertainty(v) + child_bonus(v)
 
   q_mean_weight: 0.30
   q_max_weight: 0.70
-  novelty_bonus_weight: 0.08
-  risk_penalty_weight: 0.10
+
+  final_reward_weights:
+    effectiveness: 0.50
+    diversity: 0.10
+    stability: 0.25
+    turnover: 0.10
 ```
 
 **向后兼容性**：如果 `multi_reward_uct: false` 或缺失，则继续使用原来的标量 `q_value + C(t)` 选择逻辑。
@@ -462,7 +463,6 @@ def _backpropagate(self, node: MCTSSearchNode):
     diversity: 0.10
     stability: 0.25
     turnover: 0.10
-    overfit: 0.05
 ```
 
 最终 `ranked_nodes` 从：
@@ -488,7 +488,7 @@ ranked_nodes = sorted(
 
 ## 三、完整修改汇总
 
-### 3.1 `method_config/alpha_jungle_mcts.yaml`
+### 3.1 `method_config/alpha_jungle_mcts_cosine.yaml`
 
 新增：
 
@@ -525,15 +525,14 @@ ranked_nodes = sorted(
 
   q_mean_weight: 0.30
   q_max_weight: 0.70
-  novelty_bonus_weight: 0.08
-  risk_penalty_weight: 0.10
   final_reward_weights:
     effectiveness: 0.50
     diversity: 0.10
     stability: 0.25
     turnover: 0.10
-    overfit: 0.05
 ```
+
+`method_config/alpha_jungle_mcts.yaml` 保持当前固定 C / 标量 UCT baseline，不加入多维 reward 配置。
 
 ### 3.2 `mining_methods.py`
 
@@ -551,7 +550,7 @@ ranked_nodes = sorted(
 
 ### 3.3 日志输出
 
-新增建议日志：
+当前最小实现不强制新增日志，以减少改动面。后续如果需要更细粒度排查搜索行为，可以补充以下调试日志：
 
 ```text
 INFO  - 多维 Reward UCT 已启用：early/middle/late schedule
@@ -567,9 +566,7 @@ DEBUG - backprop node=node_008 dims={effectiveness=0.62, diversity=0.74, ...}
 |-------|------|------|
 | Baseline | `multi_reward_uct: false`, `adaptive_uct: false`, `uct_c=0.70` | 当前标量 UCT |
 | Adaptive C | `multi_reward_uct: false`, `adaptive_uct: true`, `C: 1.0→0.5` | 只验证 C 衰减 |
-| MultiReward v1 | `multi_reward_uct: true`, `adaptive_uct: false` | 只验证多维 reward 调度 |
-| MultiReward v2 | `multi_reward_uct: true`, `adaptive_uct: true`, `C: 1.0→0.5` | 多维 reward + 自适应 C |
-| MultiReward v3 | v2 + 更高 late effectiveness 权重 | 验证后期收敛力度 |
+| MultiReward Cosine | `multi_reward_uct: true`, `adaptive_uct: true`, `C: 1.0→0.5` | 当前实现，多维 reward + 自适应 C |
 
 ### 4.2 重点观察指标
 
@@ -597,18 +594,17 @@ python run.py --method_config method_config/alpha_jungle_mcts_cosine.yaml --max_
 
 ### 4.4 日志验证
 
-期望日志出现：
+当前最小实现的日志验证重点是确认 cosine 配置和自适应 UCT 生效：
 
 ```text
-多维 Reward UCT 已启用
-phase=early
-phase=middle
-phase=late
-target_dimension=diversity
-target_dimension=effectiveness
+加载挖掘方法配置：alpha_jungle_mcts_cosine.yaml
+自适应 UCT 已启用：C_max=1.0, C_min=0.5, decay=cosine
+训练期 筛选完成
+MMR 筛选
+样本外指标 筛选完成
 ```
 
-并且 early 阶段 `diversity/overfit` target 明显更多，late 阶段 `effectiveness/stability` target 明显更多。
+多维 reward 调度本身主要通过配置、最终 metrics 中的 `target_dimension`、`effectiveness_score`、`diversity_score`、`stability_score`、`turnover_score`、`overfit_score` 等字段验证。若后续补充 debug 日志，再进一步检查 early 阶段 `diversity/overfit` target 是否更多，late 阶段 `effectiveness/stability` target 是否更多。
 
 ## 五、参数敏感性分析
 
@@ -622,8 +618,6 @@ target_dimension=effectiveness
 | `late.effectiveness` | 0.45 | [0.35, 0.60] | 后期入库导向 |
 | `q_max_weight` | 0.70 | [0.50, 0.80] | 保留高潜力分支 |
 | `q_mean_weight` | 0.30 | [0.20, 0.50] | 抑制偶然高分 |
-| `novelty_bonus_weight` | 0.08 | [0.03, 0.12] | 前期结构新颖性奖励 |
-| `risk_penalty_weight` | 0.10 | [0.05, 0.20] | 抑制复杂/过拟合节点 |
 
 ### 5.2 预期现象
 

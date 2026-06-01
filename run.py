@@ -55,9 +55,11 @@ class AutomatedFactorSystem:
         self.load_method_config()
         self.load_validation_config()
         self.load_data()
-        self.load_baseline_factors()
+        self.baseline_factors = {}
+        self.baseline_factor_records = []
+        # self.load_baseline_factors()
         self.mining_method = build_mining_method(self, self.method_profile)
-        self.cycle_count = self.load_checkpoint()
+        self.cycle_count = 0 # self.load_checkpoint()
 
     # ----------------------------------------------------------------
     # 初始化

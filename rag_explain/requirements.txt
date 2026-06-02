@@ -1,0 +1,4 @@
+# RAG 可解释性分析模块的额外依赖
+# 安装：pip install -r rag_explain/requirements.txt
+chromadb>=0.5
+sentence-transformers>=2.2

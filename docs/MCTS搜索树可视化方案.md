@@ -77,8 +77,9 @@ SearchTreeVisualizer (tree_viz.py)
 | 文件 | 修改类型 | 说明 |
 |------|---------|------|
 | `mining_methods.py` | 新增 45 行 | `MCTSSearchNode.to_dict()` + 保存 `_search_tree_root` |
-| `tree_viz.py` | **新建** | 可视化核心模块，~810 行 |
-| `run.py` | 新增 14 行 | 可视化集成 block（可选执行，不影响非 MCTS 方法）|
+| `tree_viz.py` | **新建** | 可视化核心模块，~870 行（含静态树、动态展开动画、节点交替标签） |
+| `tree_compare.py` | **新建** | 跨轮次对比分析模块，~210 行 |
+| `run.py` | 新增 26 行 | 可视化集成 block + 逐轮保存历史树 + 跑完后自动输出对比报告 |
 | `viz_output/` | 新建目录 | 输出目录 |
 
 ### 3.2 mining_methods.py 改动
@@ -174,6 +175,11 @@ Mean(B) + Rank(A)  →  ("BinOp", "Add", ("Call", "rank", ...), ("Call", "mean",
 if hasattr(self.mining_method, "_search_tree_root"):
     from tree_viz import SearchTreeVisualizer
     viz = SearchTreeVisualizer.from_mcts_method(self.mining_method)
+    # 保存当前轮次的历史树（用于跨轮次对比）
+    cycle_tag = f"cycle_{cycle_count:04d}"
+    viz.save_html(f"viz_output/{cycle_tag}_tree.html")
+    viz.save_json(f"viz_output/{cycle_tag}_tree.json")
+    # 同时覆盖保存最新树（方便快速查看）
     viz.save_html("viz_output/mcts_search_tree.html")
     viz.save_json("viz_output/mcts_tree.json")
 ```
@@ -181,8 +187,57 @@ if hasattr(self.mining_method, "_search_tree_root"):
 - 仅 `alpha_jungle_mcts` 方法有 `_search_tree_root`，`factor_mad` / `alpha_agent` 自动跳过
 - 异常不会影响主流程（`try/except` 包裹）
 - 未安装 `plotly` 时跳过，不报错
+- 多轮运行结束后，自动调用 `tree_compare.py` 生成跨轮次对比报告
+
+### 3.7 tree_compare.py 跨轮次对比设计
+
+#### 3.7.1 动机
+
+单棵树可视化可以展示"一次搜索的内部结构"，但无法回答以下问题：
+
+- **趋势判断**：第 5 轮找到的因子比第 1 轮更好吗？Reward 在提升还是波动？
+- **搜索效率**：随着轮次增加，搜索树是扩大还是收敛？语义等价节点在增多还是减少？
+- **因子演化**：最佳因子的表达式和维度评分在轮次间如何变化？
+
+#### 3.7.2 数据流
+
+```
+run.py 多轮运行
+     │
+     │ 每轮保存 cycle_{编号}_tree.json
+     ▼
+viz_output/
+  ├── cycle_0001_tree.json
+  ├── cycle_0002_tree.json
+  ├── cycle_0003_tree.json    ← 加载后分析对比
+  └── ...
+     │
+     ▼
+tree_compare.py
+  ├─ load_cycle_trees()       批量加载并排序
+  ├─ build_metrics_trend()     2×2 趋势面板
+  ├─ build_best_factor_table() 最佳因子对比表
+  ├─ build_dimension_radar_overlay() 5维雷达叠加
+  └─ create_comparison_report() 合并为 HTML
+     │
+     ▼
+viz_output/comparison_report.html
+```
+
+#### 3.7.3 对比维度
+
+| 图表 | 对比内容 | 说明 |
+|------|---------|------|
+| Best Reward 折线 | 每轮最佳因子 Rewad | 判断因子质量是否逐轮提升 |
+| Avg Reward 折线 | 每轮节点平均 Reward | 判断搜索整体质量趋势 |
+| 节点数柱状 | 每轮搜索树规模 | 判断搜索是否在扩大/收敛 |
+| 等价节点柱状 | 每轮语义等价节点数 | 判断搜索浪费是否在减少 |
+| 5维雷达叠加 | 每轮最佳因子评分分布 | 判断搜索焦点是否偏移 |
+| 最佳因子对比表 | 表达式 + 指标 | 每轮最终选出了什么 |
 
 ---
+
+
 
 ## 四、效果展示
 
@@ -291,7 +346,41 @@ Step 1:        Step 5:               Step 23:
 |------|------|------|
 | `viz_output/mcts_search_tree.html` | ~3.6 MB | 静态交互式报告（树 + 雷达图 + 演化表格 + 等价检测） |
 | `viz_output/mcts_tree_animated.html` | ~3.8 MB | 动态展开动画（树逐步生长，▶ Play 播放） |
-| `viz_output/mcts_tree.json` | ~2 KB | 树数据 JSON（可回读、分享） |
+| `viz_output/mcts_tree.json` | ~2 KB | 树数据 JSON（覆盖式，始终为最新一轮） |
+| `viz_output/cycle_0001_tree.json` | ~2 KB | 第 1 轮历史树 JSON（用于跨轮次对比） |
+| `viz_output/cycle_0002_tree.json` | ~2 KB | 第 2 轮历史树 JSON（用于跨轮次对比） |
+| `viz_output/comparison_report.html` | ~3.5 MB | 跨轮次对比报告（趋势图 + 对比表 + 雷达叠加） |
+
+### 4.7 跨轮次对比报告
+
+多轮运行结束后自动生成，包含三大模块：
+
+**模块一：指标趋势面板（2×2）**
+
+展示 Best Reward、Avg Reward、节点数、语义等价节点数在轮次间的变化趋势，快速判断搜索是否在进步。
+
+```
+Best Reward            Avg Reward
+ 1.0 ───●───●───     0.9 ───●───●───
+ 0.9    ●             0.8    ●
+    1   2   3   4         1   2   3   4
+
+节点数                 语义等价节点
+ 10 ┌──┐               4 ┌──┐
+  5 ┼──┼──┐            2 ┼──┼──┐
+    1  2  3  4           1  2  3  4
+```
+
+**模块二：5 维评分雷达叠加**
+
+将各轮最佳因子的 dimension_scores 叠加在同一张雷达图上，直接对比搜索焦点偏移。
+
+**模块三：最佳因子对比表**
+
+| 轮次 | 最佳表达式 | Reward | 有效性 | 多样性 | 稳定性 | 换手率 | 过拟合 | IC IR |
+|------|-----------|--------|--------|--------|--------|--------|--------|-------|
+| 1 | Rank(Delta(close, 5)) | 0.72 | 0.65 | 0.40 | 0.55 | 0.70 | 0.60 | 0.58 |
+| 2 | Rank(...) * Rank(...) | 0.85 | 0.88 | 0.42 | 0.72 | 0.65 | 0.52 | 0.70 |
 
 ---
 
@@ -310,12 +399,18 @@ Step 1:        Step 5:               Step 23:
 跑 MCTS 时（`--method_config` 指向 `alpha_jungle_mcts.yaml`），可视化会自动触发并输出到 `viz_output/`：
 
 ```bash
+# 单轮运行（输出最新树可视化）
 python run.py --method_config ./method_config/alpha_jungle_mcts.yaml
+
+# 多轮运行（输出每轮历史树 + 跑完后自动生成跨轮次对比报告）
+python run.py --method_config ./method_config/alpha_jungle_mcts.yaml --max_cycles 5
 ```
 
 跑完后 `viz_output/` 目录下会出现：
-- `mcts_search_tree.html` — 浏览器直接打开的交互式报告
-- `mcts_tree.json` — 树数据（可选，用于后续分析）
+- `mcts_search_tree.html` — 浏览器直接打开的交互式报告（最新一轮）
+- `mcts_tree.json` — 树数据 JSON（最新一轮）
+- `cycle_0001_tree.json` ~ `cycle_0005_tree.json` — 各轮历史树 JSON
+- `comparison_report.html` — 跨轮次对比报告（仅 `--max_cycles >= 2` 时生成）
 
 > 如果跑的是 `factor_mad` 或 `alpha_agent` 等其他方法，可视化 block 通过 `hasattr` 判断 `_search_tree_root` 不存在，自动跳过，**完全不影响你的流程**。
 
@@ -337,14 +432,28 @@ viz.save_animated_html("viz_output/tree_anim.html")    # 动态展开动画
 - 只想在特定轮次生成报告，不想每次都输出
 
 
-### 5.3 注意事项
+### 5.3 手动生成跨轮次对比报告
+
+已有历史树 JSON 时，可独立运行 `tree_compare.py`：
+
+```bash
+# 指定 glob 模式加载所有轮次树，输出对比报告
+python tree_compare.py --load "viz_output/cycle_*_tree.json"
+
+# 指定输出路径
+python tree_compare.py --load "viz_output/cycle_*_tree.json" --output viz_output/my_comparison.html
+```
+
+### 5.4 注意事项
 
 | 事项 | 说明 |
 |------|------|
 | **不要删除 `tree_viz.py`** | 删掉后 `run.py` 的 `from tree_viz import SearchTreeVisualizer` 会报 `ModuleNotFoundError`，但被 `try/except` 捕获，不影响主流程 |
+| **不要删除 `tree_compare.py`** | 同理，跨轮次对比会跳过报错，不影响主流程 |
 | **不要删除 `viz_output/` 目录** | `save_html/save_json` 会自动创建，删了也没关系 |
 | **不要改 `mining_methods.py` 中的 `to_dict()`** | 其他组员都不会用到这个方法，改了可能影响 JSON 输出格式 |
-| HTML 文件过大 | 24 节点约 3.6 MB（含 Plotly.js 库），如果觉得大可删掉 `include_plotlyjs=True` 改为 CDN 加载 |
+| HTML 文件过大 | 单树约 3.6 MB（含 Plotly.js 库），对比报告约 3.5 MB |
+| 对比报告至少需要 2 轮 | `--max_cycles 1` 时不会生成跨轮次对比 |
 
 
 ---
@@ -357,6 +466,8 @@ viz.save_animated_html("viz_output/tree_anim.html")    # 动态展开动画
 2. **语义等价检测**：自动识别 `A+B` vs `B+A` 类冗余，量化搜索浪费
 3. **5 维评分可视化**：雷达图网格 + hover 详情，快速定位瓶颈维度
 4. **演化路径追踪**：表格展示表达式从根到叶的每步改进
+5. **动态展开动画**：▶ Play 按钮展示搜索树逐步生长过程
+6. **跨轮次对比分析**：多轮运行后自动生成对比报告，追踪因子质量趋势
 
 
-总计新增代码：`tree_viz.py` ~870 行 + `mining_methods.py` 45 行 + `run.py` 14 行。
+总计新增代码：`tree_viz.py` ~870 行 + `tree_compare.py` ~210 行 + `mining_methods.py` 45 行 + `run.py` 26 行。

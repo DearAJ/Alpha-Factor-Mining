@@ -520,6 +520,11 @@ class AutomatedFactorSystem:
                     from tree_viz import SearchTreeVisualizer
 
                     viz = SearchTreeVisualizer.from_mcts_method(self.mining_method)
+                    # 保存当前轮次的历史树（用于跨轮次对比）
+                    cycle_tag = f"cycle_{cycle_count:04d}"
+                    viz.save_html(f"viz_output/{cycle_tag}_tree.html")
+                    viz.save_json(f"viz_output/{cycle_tag}_tree.json")
+                    # 同时覆盖保存最新树（方便快速查看）
                     viz.save_html("viz_output/mcts_search_tree.html")
                     viz.save_json("viz_output/mcts_tree.json")
                     self.logger.info(f"MCTS 搜索树可视化已保存到 viz_output/")
@@ -633,6 +638,20 @@ def main():
 
     system = AutomatedFactorSystem(config)
     system.run_forever()
+
+    # ── 跑完后自动输出跨轮次对比报告（仅 MCTS 方法） ──────────────
+    if hasattr(system.mining_method, "_search_tree_root"):
+        try:
+            from tree_compare import load_cycle_trees, create_comparison_report
+
+            cycle_data = load_cycle_trees()
+            if len(cycle_data) >= 2:
+                create_comparison_report(cycle_data)
+            elif len(cycle_data) == 1:
+                system.logger.info("仅有一轮树数据，跳过跨轮次对比（跑完多轮后自动生成）")
+        except Exception as cmp_err:
+            system.logger.warning(f"跨轮次对比报告生成失败（不影响主流程）: {cmp_err}")
+    # ─────────────────────────────────────────────────────────────────
 
 
 if __name__ == "__main__":

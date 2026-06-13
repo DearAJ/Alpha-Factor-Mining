@@ -855,10 +855,21 @@ class MCTSSearchNode:
     visits: int = 1
     q_value: float = 0.0
     children: list[MCTSSearchNode] = field(default_factory=list)
+    dimension_value_sum: dict[str, float] = field(default_factory=dict)
+    dimension_value_max: dict[str, float] = field(default_factory=dict)
+    dimension_visit_count: int = 0
 
     def __post_init__(self):
         if not self.q_value:
             self.q_value = self.reward
+        if not self.dimension_value_sum:
+            self.dimension_value_sum = {
+                dim: safe_float(value, 0.0) for dim, value in (self.dimension_scores or {}).items()
+            }
+        if not self.dimension_value_max:
+            self.dimension_value_max = dict(self.dimension_value_sum)
+        if not self.dimension_visit_count and self.dimension_scores:
+            self.dimension_visit_count = 1
 
     def to_dict(self) -> dict:
         """将 MCTS 节点及其子树递归序列化为纯 Python 字典（可 JSON 序列化）。
@@ -895,6 +906,9 @@ class MCTSSearchNode:
             "refinement_suggestion": self.refinement_suggestion,
             "candidate": _candidate_dict(self.candidate),
             "dimension_scores": {k: _convert(v) for k, v in (self.dimension_scores or {}).items()},
+            "dimension_value_sum": {k: _convert(v) for k, v in (self.dimension_value_sum or {}).items()},
+            "dimension_value_max": {k: _convert(v) for k, v in (self.dimension_value_max or {}).items()},
+            "dimension_visit_count": self.dimension_visit_count,
             "parent_id": self.parent.node_id if self.parent else None,
             "children": [child.to_dict() for child in self.children],
         }
@@ -947,7 +961,11 @@ class AlphaJungleMCTSMethod(StructuredLLMMethodBase):
             if parent is None:
                 break
 
-            target_dimension = self._sample_target_dimension(parent.dimension_scores)
+            target_dimension = self._sample_target_dimension(
+                parent.dimension_scores,
+                step=step,
+                total_steps=search_budget,
+            )
             forbidden = mine_frequent_subtrees(
                 repository,
                 self.system.fields,
@@ -976,7 +994,16 @@ class AlphaJungleMCTSMethod(StructuredLLMMethodBase):
         # 保存搜索树根节点，供 tree_viz.py 可视化导出
         self._search_tree_root = root
 
-        ranked_nodes = sorted(nodes[1:] or nodes, key=lambda node: node.reward, reverse=True)
+        final_reward_weights = self.params.get("final_reward_weights")
+        rank_pool = nodes[1:] or nodes
+        if final_reward_weights:
+            ranked_nodes = sorted(
+                rank_pool,
+                key=lambda node: self._weighted_dimension_score(node.dimension_scores, final_reward_weights),
+                reverse=True,
+            )
+        else:
+            ranked_nodes = sorted(rank_pool, key=lambda node: node.reward, reverse=True)
         top_n = int(self.params.get("top_n", self.system.config["factors_per_cycle"]))
         candidates = [node.candidate for node in ranked_nodes[:top_n]]
         candidates_df = self._build_candidate_df(candidates, "AlphaJungleMCTS 训练期")
@@ -1037,11 +1064,20 @@ class AlphaJungleMCTSMethod(StructuredLLMMethodBase):
 
         total_visits = sum(node.visits for node in eligible) + 1
         exploration_c = self._compute_adaptive_uct_c(step, total_steps)
+        use_multi_reward = self.params.get("multi_reward_uct", False)
+        _, reward_weights, _ = self._get_reward_phase(step, total_steps)
 
         def _uct(node: MCTSSearchNode) -> float:
             explore = exploration_c * sqrt(log(total_visits + 1.0) / max(1.0, node.visits))
             virtual_bonus = 1.0 / (1.0 + len(node.children))
-            return node.q_value + explore + 0.05 * virtual_bonus
+            if use_multi_reward:
+                exploit = sum(
+                    reward_weights.get(dim, 0.0) * self._node_dimension_q(node, dim)
+                    for dim in reward_weights
+                )
+            else:
+                exploit = node.q_value
+            return exploit + explore + 0.05 * virtual_bonus
 
         return max(eligible, key=_uct)
 
@@ -1061,11 +1097,71 @@ class AlphaJungleMCTSMethod(StructuredLLMMethodBase):
         else:  # linear
             return c_max - (c_max - c_min) * progress
 
-    def _sample_target_dimension(self, dimension_scores: dict[str, float]) -> str:
-        dimensions = list(self.params.get("target_dimensions", self.DEFAULT_DIMENSIONS))
-        scores = [safe_float(dimension_scores.get(dim), 0.5) for dim in dimensions]
-        pressure = [1.0 - max(0.0, min(1.0, score)) for score in scores]
-        chosen_idx = softmax_choice_index(pressure, temperature=float(self.params.get("dimension_temperature", 0.45)))
+    def _normalize_dimension_weights(self, weights: dict | None = None) -> dict[str, float]:
+        dimensions = list(self.params.get("target_dimensions", self.DEFAULT_DIMENSIONS)) or self.DEFAULT_DIMENSIONS
+        if not weights:
+            return {dim: 1.0 / len(dimensions) for dim in dimensions}
+
+        raw = {dim: max(0.0, safe_float(weights.get(dim), 0.0)) for dim in dimensions}
+        total = sum(raw.values())
+        if total <= 0:
+            return {dim: 1.0 / len(dimensions) for dim in dimensions}
+        return {dim: value / total for dim, value in raw.items()}
+
+    def _get_reward_phase(self, step: int, total_steps: int) -> tuple[str, dict[str, float], float]:
+        schedule = self.params.get("reward_schedule") or {}
+        progress = min(step / max(total_steps, 1), 1.0)
+        default_temp = float(self.params.get("dimension_temperature", 0.45))
+
+        for phase_name in ["early", "middle", "late"]:
+            phase = schedule.get(phase_name, {}) if isinstance(schedule, dict) else {}
+            if progress <= safe_float(phase.get("progress_end"), 1.0):
+                return (
+                    phase_name,
+                    self._normalize_dimension_weights(phase.get("weights")),
+                    safe_float(phase.get("dimension_temperature"), default_temp),
+                )
+
+        return "late", self._normalize_dimension_weights(), default_temp
+
+    def _node_dimension_q(self, node: MCTSSearchNode, dim: str) -> float:
+        current = safe_float((node.dimension_scores or {}).get(dim), 0.0)
+        if node.dimension_visit_count <= 0:
+            return current
+
+        mean_value = safe_float(node.dimension_value_sum.get(dim), 0.0) / max(1, node.dimension_visit_count)
+        max_value = safe_float(node.dimension_value_max.get(dim), current)
+        max_weight = float(self.params.get("q_max_weight", 0.70))
+        mean_weight = float(self.params.get("q_mean_weight", 0.30))
+        total_weight = max(max_weight + mean_weight, 1e-8)
+        return (max_weight * max_value + mean_weight * mean_value) / total_weight
+
+    def _weighted_dimension_score(self, dimension_scores: dict[str, float], weights: dict | None = None) -> float:
+        normalized_weights = self._normalize_dimension_weights(weights)
+        return sum(
+            normalized_weights.get(dim, 0.0) * safe_float((dimension_scores or {}).get(dim), 0.0)
+            for dim in normalized_weights
+        )
+
+    def _sample_target_dimension(
+        self,
+        dimension_scores: dict[str, float],
+        step: int = 0,
+        total_steps: int = 1,
+    ) -> str:
+        dimensions = list(self.params.get("target_dimensions", self.DEFAULT_DIMENSIONS)) or self.DEFAULT_DIMENSIONS
+        if self.params.get("multi_reward_uct", False):
+            _, reward_weights, temperature = self._get_reward_phase(step, total_steps)
+        else:
+            reward_weights = {dim: 1.0 for dim in dimensions}
+            temperature = float(self.params.get("dimension_temperature", 0.45))
+
+        pressure = []
+        for dim in dimensions:
+            score = safe_float((dimension_scores or {}).get(dim), 0.5)
+            pressure.append(reward_weights.get(dim, 0.0) * (1.0 - max(0.0, min(1.0, score))))
+
+        chosen_idx = softmax_choice_index(pressure, temperature=temperature)
         return dimensions[chosen_idx]
 
     def _generate_refinement_suggestion(
@@ -1270,10 +1366,16 @@ class AlphaJungleMCTSMethod(StructuredLLMMethodBase):
     def _backpropagate(self, node: MCTSSearchNode):
         current = node
         reward = node.reward
+        dimension_scores = node.dimension_scores or {}
         while current.parent is not None:
             parent = current.parent
             parent.visits += 1
             parent.q_value = max(parent.q_value, reward)
+            parent.dimension_visit_count += 1
+            for dim, value in dimension_scores.items():
+                value = safe_float(value, 0.0)
+                parent.dimension_value_sum[dim] = parent.dimension_value_sum.get(dim, 0.0) + value
+                parent.dimension_value_max[dim] = max(parent.dimension_value_max.get(dim, value), value)
             current = parent
 
     def _parse_formula_response(self, answer: str, think: str) -> dict:

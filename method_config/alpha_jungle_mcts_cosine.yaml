@@ -19,6 +19,43 @@ params:
     - stability
     - turnover
     - overfit
+  # ---- 多维 Reward 引导搜索 ----
+  multi_reward_uct: true
+  reward_schedule:
+    early:
+      progress_end: 0.35
+      weights:
+        effectiveness: 0.10
+        diversity: 0.35
+        stability: 0.15
+        turnover: 0.15
+        overfit: 0.25
+      dimension_temperature: 0.70
+    middle:
+      progress_end: 0.70
+      weights:
+        effectiveness: 0.30
+        diversity: 0.25
+        stability: 0.20
+        turnover: 0.125
+        overfit: 0.125
+      dimension_temperature: 0.45
+    late:
+      progress_end: 1.00
+      weights:
+        effectiveness: 0.45
+        diversity: 0.05
+        stability: 0.25
+        turnover: 0.15
+        overfit: 0.10
+      dimension_temperature: 0.25
+  q_mean_weight: 0.30
+  q_max_weight: 0.70
+  final_reward_weights:
+    effectiveness: 0.50
+    diversity: 0.10
+    stability: 0.25
+    turnover: 0.10
 
   top_forbidden_subtrees: 5
   min_forbidden_subtree_size: 3

@@ -56,7 +56,7 @@ STOCK_CONFIG = {
 
     # ---- 系统运行 ----
     "n_jobs":         10,   # LLM 并行调用线程数
-    "cycle_interval": 60,   # 两轮之间等待时间（秒），0 = 立即开始下一轮
+    "cycle_interval": 0,   # 两轮之间等待时间（秒），0 = 立即开始下一轮
     "error_wait":     3,    # 出错后等待时间（秒）
     "max_cycles":     20,   # 最大轮次，None = 不限
     "max_hours":      8.0,  # 最长运行时间（小时），None = 不限

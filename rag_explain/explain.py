@@ -223,7 +223,12 @@ def main():
     parser.add_argument("--no-llm", action="store_true", help="跳过 LLM 解释，仅做翻译+检索")
     args = parser.parse_args()
 
-    has_key = bool(os.environ.get("DEEPSEEK_API_KEY", ""))
+    try:
+        from config import DEEPSEEK_API_KEY
+    except Exception:
+        DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+
+    has_key = bool(DEEPSEEK_API_KEY)
     use_llm = not args.no_llm and has_key
     if not args.no_llm and not has_key:
         print("⚠️ 未检测到 DEEPSEEK_API_KEY，将跳过 LLM 解释（仅输出翻译+检索）。")

@@ -12,14 +12,24 @@ retriever.py — 本地向量库检索封装
 """
 
 import os
+from pathlib import Path
+from functools import lru_cache
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+MODEL_DIR = ROOT_DIR / "model"
 
 # 必须在 import sentence_transformers / transformers 之前设置
 os.environ.setdefault("USE_TF", "0")
 os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-from pathlib import Path
-from functools import lru_cache
+# 将 embedding 模型下载和缓存统一放到仓库的 model/ 目录
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("HF_ENDPOINT", os.environ.get("RAG_HF_ENDPOINT", "https://hf-mirror.com"))
+os.environ.setdefault("HF_HOME", str(MODEL_DIR))
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(MODEL_DIR / "hub"))
+os.environ.setdefault("TRANSFORMERS_CACHE", str(MODEL_DIR / "transformers"))
+os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(MODEL_DIR / "sentence-transformers"))
 
 import chromadb
 from chromadb.utils import embedding_functions
@@ -31,13 +41,16 @@ COLLECTION_NAME = "quant_factor_kb"
 
 # 中文小型 embedding 模型；离线、免费
 EMBED_MODEL_NAME = os.environ.get("RAG_EMBED_MODEL", "BAAI/bge-small-zh-v1.5")
+EMBED_DEVICE = os.environ.get("RAG_EMBED_DEVICE", "cpu")
 
 
 @lru_cache(maxsize=1)
 def _embedding_function():
     """构造 Chroma 用的 sentence-transformers embedding 函数（单例）。"""
     return embedding_functions.SentenceTransformerEmbeddingFunction(
-        model_name=EMBED_MODEL_NAME
+        model_name=EMBED_MODEL_NAME,
+        device=EMBED_DEVICE,
+        cache_folder=str(MODEL_DIR / "sentence-transformers"),
     )
 
 

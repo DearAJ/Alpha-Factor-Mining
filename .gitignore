@@ -37,6 +37,7 @@ logs/
 *.tmp
 tmp/
 .cache/
+model/
 
 # ===== 敏感信息（防止误提交） =====
 *.key
